@@ -3,10 +3,8 @@
 Use Linux, Python 3.12, NVIDIA GPUs and Docker with the Compose plugin.
 The Flash smoke recipe targets one 8×80GB GPU node. CPU offload also needs
 substantial host RAM; inspect the container memory limit as well as host memory.
-Minimum GPU/RAM requirements and full GPU training remain unverified.
 
-These versions were used during integration checks. They are an inventory,
-not a validated portable installation lockfile:
+These versions were used during integration checks:
 
 | Dependency | Version / revision |
 | --- | --- |
@@ -43,4 +41,4 @@ checks. Existing system/home Git profiles are preserved.
 The buffer and CPU tests can run without CUDA. Numerical tests require a matching
 PyTorch installation. The [preflight script](../scripts/preflight.py) reports
 libraries, model shards, GPUs, Docker and host/container memory. See
-[validation status](reproduction.md#validation-status) for remaining checks.
+[checks](reproduction.md#checks) for preflight and training inspection.

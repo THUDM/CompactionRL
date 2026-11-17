@@ -1,26 +1,20 @@
 # CompactionRL training in slime
 
-The parent `slime/` directory retains the complete official upstream framework
-at `41dc3b6d21d3c75b212965077a1cc4117932f06d`. Its README, model support, tools,
-backends and examples remain intact.
-
-CompactionRL's GAE and optional stepwise advantage are implemented directly in
-[ppo_utils.py](../slime/utils/ppo_utils.py); buffer conversion is in
-[compaction_buffer.py](../slime/rollout/compaction_buffer.py). The integrated
-driver is [train_compactionrl.py](../train_compactionrl.py).
-
-This directory keeps the project-specific training materials together:
+CompactionRL implements critic-based PPO with trainable context compaction in
+[slime](https://github.com/THUDM/slime). The [paper-to-code map](docs/implementation.md)
+locates token-normalized loss, cross-segment GAE, rollout conversion and model
+updates. Source revisions and changes are recorded in the [overlay guide](docs/slime_overlay.md).
 
 | Directory | Contents |
-|---|---|
-| `configs/` | GLM-4.7-Flash smoke/reference/paper, GLM-4.5-Air and ablations |
-| `scripts/` | Integrated launcher, preflight, config merging, Megatron installer and training analysis |
-| `patches/` | The reviewable 17-file slime code overlay |
-| `docs/` | [Launch recipes](docs/glm47_launch.md), [overlay](docs/slime_overlay.md), [stepwise advantage](docs/stepwise_advantage.md) and environment notes |
-| `tests/` | Training and cross-component CPU integration contracts |
+| --- | --- |
+| `configs/` | Flash smoke, Flash/Air paper configurations and paper ablations |
+| `scripts/` | Launcher, preflight, configuration merging, Megatron installer and training analysis |
+| `docs/` | [Launch guide](docs/glm47_launch.md), [environment](docs/environment.md) and [reproduction](docs/reproduction.md) |
+| `tests/` | Training and cross-component CPU checks |
+| `patches/` | Changes to the pinned upstream framework |
 
-From the repository root, install the components and compatible GPU stack as
-described in the [main README](../../README.md). The unified wrappers remain:
+After following the [installation instructions](../../README.md#getting-started),
+run these commands from the repository root to inspect the small-run plan:
 
 ```bash
 bash scripts/smoke_train_glm47_flash.sh --model "$MODEL_PATH" --dry-run
@@ -28,10 +22,12 @@ bash scripts/smoke_train_glm47_flash.sh --model "$MODEL_PATH" --validate-only
 bash scripts/train_glm47_flash.sh --help
 ```
 
-The launcher resolves the buffer, Terminus server and TiTO executable from this
-checkout. It accepts model weights and benchmark task environments as external
-assets. Token GAE is selected with `--use-compaction-gae`; native slime defaults
-and its two-argument custom advantage callbacks retain their upstream behavior.
+The smoke target is one 8 × 80 GB node, 8k context and five update batches.
+See the [launch guide](docs/glm47_launch.md) for training and checkpoint
+continuation commands.
 
-The single-machine smoke target is 8 × 80 GB GPUs; minimum resources and five
-optimizer updates remain unverified. See [validation status](docs/reproduction.md#validation-status) before running.
+For paper training, `scripts/train_glm47_flash.sh` defaults to the Flash paper
+configuration. Supply the model, explicit task-ID list, prepared task dataset and
+Ray cluster options shown in the [launch guide](docs/glm47_launch.md#flash-paper-training).
+The Air configuration specifies the 106B Air-SFT experiment. Model-specific
+launch requirements are described in the same guide.

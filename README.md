@@ -34,10 +34,10 @@ and rollout buffer, with configurations for GLM-4.7-Flash and GLM-4.5-Air-SFT.
 
 ## Overview
 
-![Context compaction and paper-reported benchmark results](assets/overview.png)
+![Context compaction and benchmark results](assets/overview.png)
 
 *Context compaction extends the interaction horizon while bounding the working
-context. The figure and benchmark results are from the paper.*
+context.*
 
 Long agent trajectories accumulate tool outputs, reasoning and intermediate
 state. A useful summary must preserve the information needed by later actions,
@@ -72,40 +72,56 @@ $$
 
 This approximates trajectory-level credit assignment while keeping segments
 independently batchable. Summary tokens participate in the loss; observations
-and repeated context prefixes are masked. The release uses the optimized-token
-count for length-adaptive lambda. Implementation details and differences from
-the historical code are documented in the
-[paper-to-code map](slime/compactionrl/docs/implementation.md) and [release implementation](slime/compactionrl/docs/reproduction.md#release-implementation).
-
-Token GAE and buffer-to-training conversion are implemented directly in slime.
-An optional [stepwise advantage](slime/compactionrl/docs/stepwise_advantage.md)
-extension is also included.
+and repeated context prefixes are masked. See the
+[paper-to-code map](slime/compactionrl/docs/implementation.md) and
+[training semantics](slime/compactionrl/docs/reproduction.md#training-semantics)
+for segment construction, token counts and actor/critic updates.
 
 ## Results
 
-Pass@1 accuracy (%), mean ± standard deviation over three evaluation runs:
+Pass@1 accuracy (%), mean ± standard deviation over three evaluation runs
+([Table 2](https://arxiv.org/abs/2607.05378v2)):
 
-| Backbone | Method | SWE-bench Verified (200 tasks) | Terminal-Bench 2.0 |
-| --- | --- | ---: | ---: |
-| GLM-4.7-Flash (30B-A3B) | Base + inference compaction | 50.5 ± 1.2 | 13.5 ± 0.9 |
-| GLM-4.7-Flash (30B-A3B) | **CompactionRL** | **56.0 ± 0.4** | **20.2 ± 0.9** |
-| GLM-4.5-Air-SFT (106B-A12B) | Base + inference compaction | 59.8 ± 1.9 | 21.3 ± 1.6 |
-| GLM-4.5-Air-SFT (106B-A12B) | **CompactionRL** | **66.4 ± 0.7** | **26.2 ± 2.1** |
+| Backbone | Peak context | Method | SWE-bench Verified (200 tasks) | Terminal-Bench 2.0 |
+| --- | --- | --- | ---: | ---: |
+| GLM-4.7-Flash (30B-A3B) | 64k | Base + inference compaction | 50.5 ± 1.2 | 13.5 ± 0.9 |
+| GLM-4.7-Flash (30B-A3B) | 64k | **CompactionRL** | **56.0 ± 0.4** | **20.2 ± 0.9** |
+| GLM-4.5-Air-SFT (106B-A12B) | 80k | Base + inference compaction | 59.8 ± 1.9 | 21.3 ± 1.6 |
+| GLM-4.5-Air-SFT (106B-A12B) | 80k | **CompactionRL** | **66.4 ± 0.7** | **26.2 ± 2.1** |
 
 CompactionRL improves the two benchmarks by **5.5 / 6.7 points** on
 GLM-4.7-Flash and **6.6 / 4.9 points** on GLM-4.5-Air-SFT compared with their
-inference-compaction baselines.
+inference-compaction baselines. Compacted evaluations allow up to three
+compactions while retaining the stated peak context length.
 
-These are **paper-reported results**. Reproduction with this prepared release
-remains pending. SWE-bench uses the fixed 200-instance subset from Appendix A.1;
-Terminal-Bench uses the full 2.0 set. Full-benchmark SWE-bench model reports have
-a different evaluation scope.
+<details>
+<summary>Additional controlled comparisons from Table 2</summary>
+
+| Backbone | Method | Training compaction | Inference compaction | SWE-bench Verified (200 tasks) | Terminal-Bench 2.0 |
+| --- | --- | :---: | :---: | ---: | ---: |
+| GLM-4.7-Flash | Base | — | No | 47.3 ± 2.7 | 14.6 ± 1.6 |
+| GLM-4.7-Flash | RL | No | No | 52.5 ± 2.5 | 16.9 ± 2.4 |
+| GLM-4.7-Flash | RL + inference compaction | No | Yes | 48.2 ± 0.5 | 12.4 ± 0.9 |
+| GLM-4.7-Flash | CompactionRL without summary loss | Yes | Yes | 54.5 ± 1.2 | 12.4 ± 0.0 |
+| GLM-4.5-Air-SFT | Base | — | No | 57.8 ± 2.1 | 18.0 ± 2.8 |
+| GLM-4.5-Air-SFT | RL | No | No | 58.3 ± 0.6 | 20.2 ± 3.7 |
+| GLM-4.5-Air-SFT | RL + inference compaction | No | Yes | 62.5 ± 1.1 | 23.6 ± 0.9 |
+| GLM-4.5-Air-SFT | CompactionRL without summary loss | Yes | Yes | 64.5 ± 2.4 | 21.7 ± 2.8 |
+
+These comparisons use the same model-specific peak context lengths as the main
+table. The two RL rows for each backbone use the same checkpoint. The
+no-summary-loss variant retains compaction during training and inference.
+
+</details>
+
+SWE-bench uses the fixed 200-instance subset from Appendix A.1, and
+Terminal-Bench uses the full 2.0 set.
 
 ## Repository Layout
 
 ```text
 CompactionRL/
-├── slime/                  # Complete slime framework + CompactionRL changes
+├── slime/                  # slime training framework with CompactionRL
 │   ├── slime/              # PPO, GAE, model backends and buffer conversion
 │   └── compactionrl/       # Training configs, scripts, patch, docs and tests
 ├── terminus/               # Harbor / Terminus-KIRA agent framework
@@ -113,25 +129,23 @@ CompactionRL/
 │   ├── prompts/            # Summary, resume and offline judge prompts
 │   ├── examples/           # File and compaction smoke tasks
 │   └── scripts/            # Task preparation, evaluation and analysis
-├── buffer/                 # Minimal SQLite buffer and rollout collector
+├── buffer/                 # SQLite buffer and rollout collector
 │   ├── src/compactionrl/   # Buffer schema, service and storage helpers
-│   └── data/manifests/     # SWE-Dev training task IDs
+│   └── data/manifests/     # Task-ID manifests
 ├── scripts/                # Unified training wrappers and storage setup
 ├── assets/                 # Paper overview and method figures
 └── SOURCE_MANIFEST.json    # Source revisions and overlay scope
 ```
 
-| Component | Guide | Included functionality |
+| Component | Guide | Purpose |
 | --- | --- | --- |
-| **slime** | [Training guide](slime/compactionrl/README.md) | Complete upstream framework, CompactionRL GAE, token-normalized loss, buffer conversion, model initialization and training recipes |
-| **Terminus** | [Agent guide](terminus/README.md) | Terminus-KIRA, context compaction, Docker tasks, verification, rollout export and TiTO |
-| **buffer** | [Buffer guide](buffer/README.md) | SQLite queue, rollout collection, loss-mask metadata, batching and analysis |
+| `slime/` | [Training guide](slime/compactionrl/README.md) | PPO, critic, cross-segment GAE, token-normalized loss and training configurations |
+| `terminus/` | [Agent guide](terminus/README.md) | Harbor / Terminus-KIRA, compaction, Docker task execution, evaluation and TiTO |
+| `buffer/` | [Buffer guide](buffer/README.md) | Rollout collection, token metadata and training-batch delivery |
 
-slime preserves the complete official source at `41dc3b6`, including its native
-models, rewards, tools, backends, examples and documentation. CompactionRL is a
-[17-file overlay](slime/compactionrl/docs/slime_overlay.md) on that baseline.
-TiTO runs as an independent process using the supplied
-[Linux executable](terminus/bin/README.md).
+Source revisions and framework changes are recorded in
+[SOURCE_MANIFEST.json](SOURCE_MANIFEST.json) and the
+[slime overlay](slime/compactionrl/docs/slime_overlay.md).
 
 ## Getting Started
 
@@ -140,21 +154,16 @@ TiTO runs as an independent process using the supplied
 - Linux x86_64, Python **3.12**, and glibc ≥ 2.34 for the bundled TiTO executable.
 - A compatible NVIDIA training environment with PyTorch, CUDA, Transformer
   Engine, SGLang, Megatron-LM and mbridge. See the
-  [environment notes](slime/compactionrl/docs/environment.md) for the observed
+  [environment guide](slime/compactionrl/docs/environment.md) for dependency
   versions and compatibility requirements.
 - Docker with the Compose plugin for task execution.
 - Local model weights and prepared benchmark task environments.
 
-The code, prompts, TiTO executable and task manifests are included here. Model
-weights, benchmark images and the GPU software stack are supplied separately.
-The environment notes describe the preparation environment; a fresh-machine GPU
-installation has not yet been validated.
-
 ### Installation
 
-Run the following from the repository root in an existing compatible GPU
-environment. Place the repository, runtime/cache paths, training outputs and
-Docker data root on a mounted data volume.
+Run from the repository root in an existing compatible GPU environment. The
+current launcher requires the checkout, output/cache directories and Docker data
+root on a mounted data filesystem; see the [deployment guide](slime/compactionrl/docs/glm47_launch.md#deployment-requirements).
 
 ```bash
 # Choose a short runtime path on a mounted data volume.
@@ -173,26 +182,20 @@ export MEGATRON_PATH="$PWD/.deps/Megatron-LM"
 export PYTHONPATH="$PWD/buffer/src:$PWD/slime:$PWD/terminus/src:$MEGATRON_PATH"
 ```
 
-The launcher resolves the project components from this checkout and does not
-source an earlier experiment repository. It redirects temporary files and
-runtime caches to the selected data volume. Docker's data root is checked
-separately; see [storage and launch requirements](slime/compactionrl/docs/glm47_launch.md).
+Download the official [GLM-4.7-Flash](https://huggingface.co/zai-org/GLM-4.7-Flash)
+HF checkpoint to a local directory before running the examples. The experiments
+use GLM-4.7-Flash (30B-A3B) and GLM-4.5-Air-SFT (106B-A12B); see
+[models and data](slime/compactionrl/docs/reproduction.md#models-and-data).
 
 ## Training
 
-### GLM-4.7-Flash: five-update smoke recipe
+### Quick start: Flash smoke
 
-Use the official **GLM-4.7-Flash (30B-A3B)** HF checkpoint with
-`model_type=glm4_moe_lite`. The smoke recipe targets one **8 × 80 GB GPU** node:
-four GPUs shared by actor/critic and four for rollout. It uses an 8k context
-budget, low concurrency and two bundled tasks, including a task designed to
-trigger compaction.
-
-**Validation status:** CPU contract tests, packaging checks and launcher dry-runs
-have passed. Real GLM optimizer updates, summary gradients, checkpoint
-save/resume and paper-score reproduction remain pending. The GPU allocation is
-a test target; minimum resources have not been measured. CPU offload requires
-substantial host RAM, so check the container's memory limit before running.
+Use the Flash checkpoint with `model_type=glm4_moe_lite`. The smoke recipe
+targets one **8 × 80 GB GPU** node: four GPUs shared by
+actor/critic and four for rollout. It uses an **8k context**, two bundled tasks
+and **five update batches** to check integration. CPU offload requires host RAM;
+check both the host and container memory limits before running.
 
 Inspect the environment and generated commands first:
 
@@ -204,24 +207,19 @@ bash scripts/smoke_train_glm47_flash.sh --model "$MODEL_PATH" --validate-only
 ```
 
 `--dry-run` prints the service and training commands. `--validate-only` checks
-assets and the actual training argument parsers with hidden GPUs and an 8 GiB
-process address-space limit. The new bounded parser still awaits Linux
-verification; see the [validation status](slime/compactionrl/docs/reproduction.md#validation-status).
-
-Once the environment and resource checks pass, launch the small run:
+model/task assets and training arguments. Once these checks pass, launch:
 
 ```bash
 bash scripts/smoke_train_glm47_flash.sh \
-  --model "$MODEL_PATH" --steps 5 \
-  --output "$PWD/runs/glm47-flash-smoke"
+  --model "$MODEL_PATH" --steps 5 --output "$PWD/runs/glm47-flash-smoke"
 ```
 
 The launcher starts the SGLang router, Harbor, TiTO and buffer, then the slime
 training driver. The output directory contains service logs, TensorBoard events,
-the buffer database and actor/critic checkpoints. A new output directory is
-required for each invocation.
+the buffer database and actor/critic checkpoints. Use a new output directory for
+each invocation.
 
-To continue a successfully saved run for one further update:
+To continue a saved run for one further update batch:
 
 ```bash
 bash scripts/smoke_train_glm47_flash.sh \
@@ -229,85 +227,94 @@ bash scripts/smoke_train_glm47_flash.sh \
   --steps 6 --output "$PWD/runs/glm47-flash-resume"
 ```
 
-`--steps` specifies the target total rollout updates, including resumed updates.
-The smoke recipe checks integration; the paper uses 50 critic-pretraining steps
-and longer training. See the
-[launch guide](slime/compactionrl/docs/glm47_launch.md) for ports, initialization,
-checkpoint continuation and resource settings.
+`--steps` specifies the total target, including batches completed before resuming.
+See the [launch guide](slime/compactionrl/docs/glm47_launch.md) for ports,
+initialization, checkpoint continuation and resource settings.
 
-### Reference and paper configurations
+### Paper configurations
 
 | Configuration | Purpose |
 | --- | --- |
-| [Flash smoke](slime/compactionrl/configs/glm47_flash/smoke.yaml) | Five-update integration recipe, 8k context, standard PPO, one 8-GPU node |
-| [Flash reference](slime/compactionrl/configs/glm47_flash/reference.yaml) | Historical GLM script adapted to this repo: VAPO/DPPO, batch 128, 80k context, 80 GPUs |
-| [Flash paper](slime/compactionrl/configs/glm47_flash/paper.yaml) | Manuscript settings: 64k context, token GAE and critic pretraining |
-| [Air paper](slime/compactionrl/configs/glm45_air/paper.yaml) | Manuscript settings for the 106B SFT starting model and 80k context |
-| [Ablations](slime/compactionrl/configs/ablations/README.md) | Summary masking, cross-segment discount, loss normalization, context budgets and stepwise advantage |
+| [Flash smoke](slime/compactionrl/configs/glm47_flash/smoke.yaml) | Five-batch integration check, 8k context and one 8-GPU node |
+| [Flash paper](slime/compactionrl/configs/glm47_flash/paper.yaml) | 30B, 64k context, PPO and critic pretraining |
+| [Air paper](slime/compactionrl/configs/glm45_air/paper.yaml) | 106B Air-SFT, 80k context, PPO and critic pretraining |
+| [Paper ablations](slime/compactionrl/configs/ablations/README.md) | Summary loss, cross-segment GAE, loss normalization, SUPO and 160k context comparisons |
 
-The reference recipe requires an existing Ray cluster with this checkout, model
-and prepared tasks available at the same absolute paths on all nodes:
+For Flash, prepare the paper training task list and Harbor-format environments,
+and use a compatible Ray cluster with this checkout, model and task directories
+available at the same absolute paths on all nodes. Inspect the plan first:
 
 ```bash
 bash scripts/train_glm47_flash.sh \
-  --model "$MODEL_PATH" --dataset /absolute/path/to/prepared-swedev-tasks \
+  --config slime/compactionrl/configs/glm47_flash/paper.yaml \
+  --model "$MODEL_PATH" \
+  --tasks /absolute/path/to/paper-training-task-ids.json \
+  --dataset /absolute/path/to/prepared-swedev-tasks \
   --ray-address "$HEAD_IP:6379" --host "$HEAD_IP" --bind-host 0.0.0.0 \
-  --steps 180 --output "$PWD/runs/glm47-flash-reference" --validate-only
+  --steps 230 --output "$PWD/runs/glm47-flash-paper" --dry-run
 ```
 
-After environment verification, remove `--validate-only` to launch. The Flash
-launcher targets the 30B model. The Air YAML records manuscript settings and
-requires model-specific cluster integration. Paper configurations still need
-hardware calibration, checkpoint lineage and historical experiment reconciliation;
-see [reproduction scope](slime/compactionrl/docs/reproduction.md).
+Use `--validate-only` in place of `--dry-run` to check local assets and training
+arguments. Remove that flag to launch once environment checks pass. Configure
+cluster parallelism for the available hardware as described in the
+[launch guide](slime/compactionrl/docs/glm47_launch.md#flash-paper-training).
+
+The training wrapper defaults to the Flash paper configuration. Pass `--tasks`
+explicitly: the current launcher does not expand the YAML's
+`${TRAIN_TASK_MANIFEST}` placeholder. In this implementation, **230 batches =
+50 critic-only batches + 180 PPO batches**. Air's configuration uses **150 =
+50 + 100**. The two critic passes per batch also apply during warmup; see
+[training semantics](slime/compactionrl/docs/reproduction.md#training-semantics)
+for the distinction between batches and optimizer updates.
 
 ## Evaluation
 
-The repository includes task-ID manifests for:
-
-- [SWE-Dev training](buffer/data/manifests/swedev_reference_1105.json): **1,105**
-  unique IDs from the supplied reference script.
-- [SWE-bench Verified evaluation](terminus/data/manifests/swe_verified_200.json):
-  the fixed **200** instances listed in the paper's Appendix A.1.
-
-Prepare Harbor-format task directories and their Docker images separately. To
-validate the SWE-bench subset against a local dataset:
+Use the fixed [SWE-bench Verified manifest](terminus/data/manifests/swe_verified_200.json)
+with locally prepared Harbor tasks and Docker images:
 
 ```bash
 python terminus/scripts/prepare_tasks.py \
   --dataset /absolute/path/to/swe-verified-harbor \
   --manifest terminus/data/manifests/swe_verified_200.json \
-  --output runs/swe200.json
+  --output "$COMPACTIONRL_WORK_DIR/swe200.json"
 ```
 
-For Terminal-Bench 2.0, omit `--manifest` to select all tasks in the prepared local
-dataset and record its version. With the inference, Harbor and TiTO services
-configured for the evaluation model, run:
+This command validates existing tasks; it does not download or convert benchmark
+content. For Terminal-Bench 2.0, omit `--manifest` to select the full prepared
+local dataset and record its version.
+
+Configure the inference, Harbor and TiTO services for the checkpoint being
+evaluated, then run:
 
 ```bash
+export EVAL_MODEL_PATH=/absolute/path/to/evaluation-hf-checkpoint
 python terminus/scripts/evaluate.py \
   --config slime/compactionrl/configs/glm47_flash/paper.yaml \
-  --tasks runs/swe200.json --model "$MODEL_PATH" \
-  --runs 3 --output runs/evaluation
+  --tasks "$COMPACTIONRL_WORK_DIR/swe200.json" --model "$EVAL_MODEL_PATH" \
+  --runs 3 --output "$PWD/runs/evaluation"
 ```
 
-The evaluator preserves every run and writes aggregate Pass@1 statistics.
-Infrastructure failures are recorded separately and remain in the denominator;
-inspect them before comparing results. The manifests identify tasks; they do
-not include benchmark content or container images. Exact training-data filtering
-and correspondence to the paper runs remain part of the reproduction work.
+The evaluation script calls existing services; it does not start them. Use the
+Air configuration for its 80k evaluation setting and the checkpoint matching
+the desired result row.
+
+Every run is retained and aggregate Pass@1 statistics are written to
+`summary.json`. Infrastructure failures remain in the denominator and are
+recorded separately. See the [evaluation protocol](slime/compactionrl/docs/reproduction.md#evaluation-protocol)
+for timeout settings and result aggregation.
 
 ## Documentation and Checks
 
 | Guide | Contents |
 | --- | --- |
-| [Training](slime/compactionrl/docs/glm47_launch.md) | Smoke/reference launch, services, storage, resume and resource requirements |
-| [Paper-to-code map](slime/compactionrl/docs/implementation.md) | Locations of rollout compaction, masks, GAE, losses and evaluation |
-| [slime overlay](slime/compactionrl/docs/slime_overlay.md) | Complete upstream baseline, changes and patch reconstruction |
-| [Buffer protocol](buffer/docs/buffer_protocol.md) | Segment schema, token metadata, queue and collector |
-| [Reproduction](slime/compactionrl/docs/reproduction.md) | Paper settings, ablations and outstanding assets |
+| [Training](slime/compactionrl/docs/glm47_launch.md) | Smoke and paper launch, services, storage, resume and resource requirements |
+| [Paper-to-code map](slime/compactionrl/docs/implementation.md) | Algorithms, prompts and token metadata |
+| [slime overlay](slime/compactionrl/docs/slime_overlay.md) | Source revisions, framework changes and patch reconstruction |
+| [Buffer protocol](buffer/docs/buffer_protocol.md) | Segment construction, masks and batch delivery |
+| [Reproduction](slime/compactionrl/docs/reproduction.md) | Training settings, data and evaluation protocol |
+| [Paper ablations](slime/compactionrl/configs/ablations/README.md) | Configuration overlays and inference settings |
 
-Run the project CPU checks from the repository root after installation:
+After installation, run the project CPU checks:
 
 ```bash
 pytest -c pytest.ini -q

@@ -31,8 +31,7 @@ The exact 17-file list is in [SOURCE_MANIFEST.json](../../../SOURCE_MANIFEST.jso
 The original CompactionRL development snapshot is
 `bc092af4572c2db5c8459e9e9e890169e2ca1120`, with the recorded working changes.
 Its old private buffer rollout and duplicate advantage plugin are replaced by the
-project adapters. The patch also includes fixes found during preparation; this
-is not a claim that the resulting tree produced the paper's reported scores.
+project adapters. The patch also includes fixes made during integration.
 
 Useful stepwise GAE is retained in slime with an explicit optional
 configuration; see [stepwise advantage](stepwise_advantage.md). Duplicate GAE
@@ -64,6 +63,4 @@ The patch was applied to a fresh copy of the pinned official tree and all 472
 resulting framework file/link entries matched the vendored tree exactly.
 The separate `slime/compactionrl/` directory holds project configs, documentation,
 scripts, tests and the patch; it is excluded from framework reconstruction checks.
-This validates
-source reconstruction and preservation. GPU optimizer updates and checkpoint
-continuation remain unverified; see [validation status](reproduction.md#validation-status).
+See [checks](reproduction.md#checks) for preflight and training inspection.
