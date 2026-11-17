@@ -1,0 +1,67 @@
+{
+  "status": "selected source baselines; exact historical experiment checkout remains unverified",
+  "sources": {
+    "harbor": {
+      "commit": "cbcff3c12810e309aa5338441fe42627703e4a29",
+      "reason": "local multiturn_compaction before forward-rollout extensions"
+    },
+    "slime": {
+      "repository": "https://github.com/THUDM/slime",
+      "commit": "41dc3b6d21d3c75b212965077a1cc4117932f06d",
+      "archive_url": "https://codeload.github.com/THUDM/slime/tar.gz/41dc3b6d21d3c75b212965077a1cc4117932f06d",
+      "archive_sha256": "7557f10827dbae512d601e4fa7d7a0b3a732295ce9336dae8ad478e359630e93",
+      "native_files": 468,
+      "compaction_reference_commit": "bc092af4572c2db5c8459e9e9e890169e2ca1120",
+      "working_changes": [
+        "custom estimator reward propagation",
+        "metadata schema (superseded by strict adapter)",
+        "DPPO old log-prob sign fix"
+      ],
+      "overlay_patch": "slime/compactionrl/patches/slime_compactionrl.patch",
+      "overlay_files": [
+        "slime/backends/megatron_utils/actor.py",
+        "slime/backends/megatron_utils/arguments.py",
+        "slime/backends/megatron_utils/checkpoint.py",
+        "slime/backends/megatron_utils/loss.py",
+        "slime/backends/megatron_utils/model.py",
+        "slime/backends/megatron_utils/model_provider.py",
+        "slime/ray/actor_group.py",
+        "slime/ray/placement_group.py",
+        "slime/ray/rollout.py",
+        "slime/rollout/compaction_buffer.py",
+        "slime/utils/arguments.py",
+        "slime/utils/megatron_bridge_utils.py",
+        "slime/utils/memory_saver_utils.py",
+        "slime/utils/ppo_utils.py",
+        "slime/utils/profile_utils.py",
+        "slime/utils/types.py",
+        "train_compactionrl.py"
+      ],
+      "native_entries": 469,
+      "project_assets_directory": "slime/compactionrl"
+    },
+    "agentrollforge": {
+      "commit": "167fe5a44b8455c83a67739fb93d1ad92b466017",
+      "usage": "protocol reference for new minimal buffer and TiTO implementation"
+    }
+  },
+  "reference_launch": {
+    "filename": "0502_glm47flash_vapo_swe_64k_tito_summaryauto_mixtrain_swedev1.2k_summaryasaturn_gae_0.5timeout_disablepager_fixmainkey.sh",
+    "sha256": "3cf7ffd839ad640044466195208f44aaf8cb27d900f821a1cb9a0529523a6701",
+    "training_manifest": "buffer/data/manifests/swedev_reference_1105.json",
+    "task_count": 1105,
+    "status": "script and dataset identified; exact paper-run linkage unverified"
+  },
+  "public_megatron_dependency": {
+    "repository": "https://github.com/NVIDIA/Megatron-LM",
+    "tag": "core_v0.15.3",
+    "commit": "309ffca6a40553362d44fd17efc56b772fa1aa44",
+    "archive_sha256": "6754357aec7fb773cc65175e9c4469acc564ddf8653968d05506f2affae096e5"
+  },
+  "layout": {
+    "slime": "slime/",
+    "terminus": "terminus/",
+    "buffer": "buffer/",
+    "python_buffer_package": "buffer/src/compactionrl"
+  }
+}

@@ -1,0 +1,10 @@
+{
+  "agent": {
+    "enable_summarize": false,
+    "context_management_max_count": 0,
+    "rollout_max_context_length": 163840
+  },
+  "training": {
+    "rollout_max_context_len": 163840
+  }
+}

@@ -1,0 +1,4 @@
+training:
+  use_step_level_advantage: true
+  stepwise_advantage_type: last_token
+  critic_stepwise_max_chunk_size: -1

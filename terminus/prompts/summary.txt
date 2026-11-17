@@ -1,0 +1,26 @@
+Your job is to create a detailed summary of the conversation so far, paying close attention to the
+user’s explicit requests and the work already completed.
+Original task:
+{ORIGINAL_INSTRUCTION}
+You are summarizing the earlier portion of the conversation only. {RECENT_MESSAGE_NOTE}
+will remain in the conversation verbatim, so do not repeat them in detail unless they are required
+for continuity.
+Do not assume you can read external files or use tools. Work only from the conversation provided
+in this context.
+Before providing the summary, think through what matters most to preserve. Write the response
+using exactly these tags:
+<analysis> Brief internal reasoning about what to preserve. </analysis>
+<summary> Your summary here. </summary>
+Inside <summary>, organize the content so the next model can continue without reading any
+external files. Include:
+1. Primary Request and Intent
+2. Key Technical Concepts
+3. Files and Code Sections examined or changed
+4. Errors encountered and how they were addressed
+5. Problem Solving and important decisions
+6. All user messages and explicit asks from the summarized portion
+7. Pending Tasks
+8. Current Work
+9. Optional Next Step
+Be concrete. Preserve exact commands, outputs, code behavior, and error text when those details
+matter for the work to continue. Do not output JSON.

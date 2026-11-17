@@ -1,0 +1,20 @@
+{
+  "version": "0.1.0",
+  "platform": "linux-x86_64",
+  "python": "CPython 3.12",
+  "packaging": "ELF bootstrap with an embedded CPython bytecode payload",
+  "payload_sha256": "3af9db9d08fc22d50865c475bb7e25d7632974b3bd82caa31dc4d51dc89b0406",
+  "source_sha256": "07abf5816fe1328fc1b8c9cfe7ea18560ffa9658429a17999e86f912b8c7af65",
+  "runtime_dependencies": [
+    "Python 3.12",
+    "fastapi",
+    "uvicorn",
+    "httpx",
+    "transformers",
+    "tokenizers"
+  ],
+  "license": "Apache-2.0",
+  "provenance": "Packaged CompactionRL TiTO implementation; not the unavailable historical Rust executable",
+  "binary_sha256": "b1aa40326867d28343a6ca5b0a7f0e72c312238824747ad9c3b7dbad2e597917",
+  "binary_bytes": 43971
+}

@@ -1,0 +1,73 @@
+# Paper specification. Cluster parallelism and historical experiment provenance are not yet validated.
+model_path: ${MODEL_PATH}
+harbor_url: http://127.0.0.1:18080
+generation_url: http://127.0.0.1:31200
+task_ids: ${TRAIN_TASK_MANIFEST}
+concurrency: 16
+capacity: 2048
+prefetch_segments: 256
+timeout_seconds: 3600
+agent:
+  max_iterations: 250
+  rollout_max_context_length: 81920
+  sampling_params: {temperature: 1.0, top_p: 1.0, max_new_tokens: 10240}
+  enable_summarize: true
+  summarization_mode: summarize
+  summary_training: full
+  summary_history_user_turns: 2
+  context_management_proactive_threshold: 10240
+  context_management_max_new_tokens: 10240
+  context_management_max_count: 3
+training:
+  actor_num_nodes: 4
+  actor_num_gpus_per_node: 8
+  critic_num_nodes: 4
+  critic_num_gpus_per_node: 8
+  rollout_num_gpus: 32
+  rollout_num_gpus_per_engine: 4
+  tensor_model_parallel_size: 1
+  pipeline_model_parallel_size: 1
+  context_parallel_size: 1
+  expert_model_parallel_size: 4
+  expert_tensor_parallel_size: 1
+  bf16: true
+  megatron_to_hf_mode: bridge
+  transformer_impl: transformer_engine
+  micro_batch_size: 1
+  global_batch_size: 128
+  rollout_batch_size: 128
+  n_samples_per_prompt: 1
+  rollout_max_response_len: 10240
+  rollout_max_context_len: 81920
+  advantage_estimator: ppo
+  clip_type: default
+  eps_clip: 0.2
+  eps_clip_high: 0.2
+  gamma: 1.0
+  lambd_critic: 1.0
+  use_length_adaptive_gae: true
+  length_adaptive_alpha: 1.5
+  use_compaction_gae: true
+  compaction_advantage_mode: gae
+  calculate_per_token_loss: true
+  use_rollout_logprobs: true
+  kl_coef: 0.0
+  optimizer: adam
+  lr: 0.000002
+  critic_lr: 0.000003
+  critic_train_epoch: 2
+  num_critic_only_steps: 50
+  adam_beta1: 0.9
+  adam_beta2: 0.98
+  weight_decay: 0.1
+  optimizer_cpu_offload: true
+  use_precision_aware_optimizer: true
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+  update_weights_interval: 1
+  save_interval: 5
+  sglang_mem_fraction_static: 0.65
+  sglang_disable_cuda_graph: true
+  disable_rollout_global_dataset: true
+  num_rollout: 150

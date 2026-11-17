@@ -1,0 +1,97 @@
+# Adapted from the user-supplied 0502 GLM-4.7-Flash training script.
+# This is the historical script configuration, not the manuscript specification.
+model_path: ${MODEL_PATH}
+harbor_url: http://127.0.0.1:18080
+generation_url: http://127.0.0.1:31200
+task_ids: buffer/data/manifests/swedev_reference_1105.json
+concurrency: 500
+capacity: 4096
+prefetch_segments: 256
+timeout_seconds: 7200
+tito_ttl_seconds: 36000
+agent:
+  timeout_multiplier: 0.5
+  max_iterations: 250
+  rollout_max_context_length: 81920
+  sampling_params: {temperature: 1.0, top_p: 1.0, max_new_tokens: 65536}
+  enable_summarize: auto
+  summarization_mode: summarize
+  summary_training: full
+  summary_history_user_turns: 2
+  context_management_max_input_tokens: 65536
+  context_management_proactive_threshold: 10240
+  context_management_max_new_tokens: 10240
+  context_management_max_count: 3
+training:
+  actor_num_nodes: 2
+  actor_num_gpus_per_node: 8
+  critic_num_nodes: 2
+  critic_num_gpus_per_node: 8
+  rollout_num_gpus: 64
+  rollout_num_gpus_per_engine: 4
+  tensor_model_parallel_size: 4
+  pipeline_model_parallel_size: 2
+  decoder_last_pipeline_num_layers: 23
+  context_parallel_size: 2
+  expert_model_parallel_size: 8
+  expert_tensor_parallel_size: 1
+  sequence_parallel: true
+  bf16: true
+  megatron_to_hf_mode: raw
+  transformer_impl: transformer_engine
+  seq_length: 81920
+  micro_batch_size: 1
+  global_batch_size: 128
+  rollout_batch_size: 128
+  n_samples_per_prompt: 1
+  balance_data: true
+  rollout_max_response_len: 65536
+  rollout_max_context_len: 81920
+  rollout_temperature: 1.0
+  advantage_estimator: vapo
+  clip_type: dppo
+  eps_clip: 0.2
+  eps_clip_high: 3.0
+  gamma: 1.0
+  lambd_critic: 1.0
+  use_length_adaptive_gae: true
+  length_adaptive_alpha: 1.5
+  use_compaction_gae: true
+  compaction_advantage_mode: gae
+  calculate_per_token_loss: true
+  use_rollout_logprobs: true
+  kl_coef: 0.0
+  kl_loss_coef: 0.0
+  entropy_coef: 0.0
+  optimizer: adam
+  lr: 0.000002
+  critic_lr: 0.000003
+  critic_lr_warmup_iters: 0
+  critic_train_epoch: 2
+  num_critic_only_steps: 0
+  update_critic_expert_weights_only: true
+  lr_decay_style: constant
+  adam_beta1: 0.9
+  adam_beta2: 0.98
+  weight_decay: 0.1
+  optimizer_cpu_offload: true
+  overlap_cpu_optimizer_d2h_h2d: true
+  use_precision_aware_optimizer: true
+  recompute_granularity: full
+  recompute_method: uniform
+  recompute_num_layers: 1
+  use_dynamic_batch_size: true
+  max_tokens_per_gpu: 40960
+  update_weights_interval: 8
+  save_interval: 10
+  sglang_disable_piecewise_cuda_graph: true
+  sglang_mem_fraction_static: 0.8
+  sglang_cuda_graph_bs: [1, 2, 4, 8, 16, 24, 32, 40, 48, 56, 64, 72, 80, 88, 96, 104, 112, 120, 128, 136, 144, 152, 160, 168, 176, 184, 192, 200, 208, 216, 224, 232, 240, 248, 256]
+  attention_dropout: 0.0
+  hidden_dropout: 0.0
+  accumulate_allreduce_grads_in_fp32: true
+  attention_softmax_in_fp32: true
+  attention_backend: flash
+  moe_token_dispatcher_type: alltoall
+  disable_rollout_global_dataset: true
+  num_rollout: 300000

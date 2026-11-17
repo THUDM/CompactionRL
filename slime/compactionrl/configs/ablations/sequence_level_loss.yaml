@@ -1,0 +1,5 @@
+{
+  "training": {
+    "calculate_per_token_loss": false
+  }
+}

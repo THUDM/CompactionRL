@@ -1,0 +1,14 @@
+version = "1.0"
+[metadata]
+difficulty = "easy"
+category = "programming"
+tags = ["compaction-smoke"]
+[agent]
+timeout_sec = 600
+[verifier]
+timeout_sec = 60
+[environment]
+build_timeout_sec = 300
+cpus = 1
+memory = "2G"
+storage = "4G"

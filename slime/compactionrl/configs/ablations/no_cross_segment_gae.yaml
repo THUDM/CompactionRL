@@ -1,0 +1,5 @@
+{
+  "training": {
+    "compaction_advantage_mode": "none"
+  }
+}

@@ -1,0 +1,1040 @@
+diff --git a/slime/backends/megatron_utils/actor.py b/slime/backends/megatron_utils/actor.py
+--- a/slime/backends/megatron_utils/actor.py
++++ b/slime/backends/megatron_utils/actor.py
+@@ -370,7 +370,7 @@
+             rollout_data = self._get_rollout_data(rollout_data_ref)
+ 
+         if self.role == "critic":
+-            result = self.train_critic(rollout_id, rollout_data)
++            result = self.train_critic(rollout_id, rollout_data, getattr(self.args, "critic_train_epoch", 1))
+         else:
+             self.train_actor(rollout_id, rollout_data, external_data=external_data)
+             result = None
+@@ -380,24 +380,25 @@
+ 
+         return result
+ 
+-    def train_critic(self, rollout_id: int, rollout_data: RolloutBatch):
++    def train_critic(self, rollout_id: int, rollout_data: RolloutBatch, critic_train_epoch: int = 1):
+         """Train critic and return CPU values (used as old-values for the next actor train)."""
+-        data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
+-
+-        # Compute current critic values (used as old_values for value loss and for actor advantages).
+-        rollout_data.update(forward_only(get_values, self.args, self.model, data_iterator, num_microbatches))
+-
+-        compute_advantages_and_returns(self.args, rollout_data)
+-
+-        self.args.loss_type = "value_loss"
+-        train(
+-            rollout_id,
+-            self.model,
+-            self.optimizer,
+-            self.opt_param_scheduler,
+-            data_iterator,
+-            num_microbatches,
+-        )
++        for _ in range(critic_train_epoch):
++            data_iterator, num_microbatches = get_data_iterator(self.args, self.model, rollout_data)
++
++            # Compute current critic values (used as old_values for value loss and for actor advantages).
++            rollout_data.update(forward_only(get_values, self.args, self.model, data_iterator, num_microbatches))
++
++            compute_advantages_and_returns(self.args, rollout_data, is_policy=False)
++
++            self.args.loss_type = "value_loss"
++            train(
++                rollout_id,
++                self.model,
++                self.optimizer,
++                self.opt_param_scheduler,
++                data_iterator,
++                num_microbatches,
++            )
+ 
+         if mpu.is_pipeline_last_stage() and "values" in rollout_data:
+             from slime.backends.megatron_utils.data import tensors_to_cpu
+diff --git a/slime/backends/megatron_utils/arguments.py b/slime/backends/megatron_utils/arguments.py
+--- a/slime/backends/megatron_utils/arguments.py
++++ b/slime/backends/megatron_utils/arguments.py
+@@ -145,6 +145,11 @@
+ 
+ 
+ def _set_default_megatron_args(args):
++    # Some Megatron forks validate this optional data-loader flag without
++    # registering it in their base parser. slime provides its own packed batches.
++    for name in ("repack_batches", "pack_sequence", "post_self_attn_layernorm", "post_mlp_layernorm", "record_memory_history"):
++        if not hasattr(args, name):
++            setattr(args, name, False)
+     # always use zero optimizer
+     args.use_distributed_optimizer = True
+     # TODO: maybe change this after megatron has good fp8 support
+diff --git a/slime/backends/megatron_utils/checkpoint.py b/slime/backends/megatron_utils/checkpoint.py
+--- a/slime/backends/megatron_utils/checkpoint.py
++++ b/slime/backends/megatron_utils/checkpoint.py
+@@ -127,18 +127,21 @@
+ 
+ 
+ def _load_checkpoint_hf(ddp_model, optimizer, args, load_path: str):
+-    assert args.megatron_to_hf_mode == "bridge", "Only bridge mode is supported for loading HF checkpoint"
+-    from megatron.bridge import AutoBridge
+-
+-    import slime_plugins.megatron_bridge  # noqa: F401
+-
+-    logger.info(f"Load checkpoint from HuggingFace model into Megatron (path={load_path})")
+-
+-    with megatron_bridge_utils.patch_megatron_model(ddp_model):
+-        bridge = megatron_bridge_utils.patch_auto_bridge_hf_config(
+-            AutoBridge.from_hf_pretrained(load_path, trust_remote_code=True)
+-        )
+-        bridge.load_hf_weights(ddp_model)
++    logger.info(f"Load HF backbone into Megatron (path={load_path}, mode={args.megatron_to_hf_mode})")
++    with megatron_bridge_utils.preserve_critic_value_head(ddp_model):
++        if args.megatron_to_hf_mode == "raw":
++            from mbridge import AutoBridge
++            import slime_plugins.mbridge  # noqa: F401
++            bridge = AutoBridge.from_pretrained(load_path, trust_remote_code=True)
++            bridge.load_weights(ddp_model, load_path, memory_efficient=True)
++        else:
++            from megatron.bridge import AutoBridge
++            import slime_plugins.megatron_bridge  # noqa: F401
++            with megatron_bridge_utils.patch_megatron_model(ddp_model):
++                bridge = megatron_bridge_utils.patch_auto_bridge_hf_config(
++                    AutoBridge.from_hf_pretrained(load_path, trust_remote_code=True)
++                )
++                bridge.load_hf_weights(ddp_model)
+ 
+     # Copied from Megatron-core :: load_checkpoint (with simplifications)
+     if (args.fp16 or args.bf16) and optimizer is not None:
+diff --git a/slime/backends/megatron_utils/loss.py b/slime/backends/megatron_utils/loss.py
+--- a/slime/backends/megatron_utils/loss.py
++++ b/slime/backends/megatron_utils/loss.py
+@@ -13,6 +13,7 @@
+ from slime.utils.ppo_utils import (
+     calculate_log_probs_and_entropy,
+     compute_approx_kl,
++    compute_compaction_advantages,
+     compute_gspo_kl,
+     compute_opsm_mask,
+     compute_policy_loss,
+@@ -568,7 +569,7 @@
+     rollout_data["opd_reverse_kl"] = reverse_kls
+ 
+ 
+-def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch) -> None:
++def compute_advantages_and_returns(args: Namespace, rollout_data: RolloutBatch, is_policy: bool = True) -> None:
+     """Compute advantages and returns in-place based on `args.advantage_estimator`.
+ 
+     This function extracts rewards, log-probs, values, and masks from
+@@ -624,7 +625,10 @@
+         ]
+     rollout_data["kl"] = kl
+ 
+-    if args.custom_advantage_function_path is not None:
++    if getattr(args, "use_compaction_gae", False):
++        compute_compaction_advantages(args, rollout_data, is_policy=is_policy)
++        advantages, returns = rollout_data["advantages"], rollout_data["returns"]
++    elif args.custom_advantage_function_path is not None:
+         custom_adv_fn = load_function(args.custom_advantage_function_path)
+         custom_adv_fn(args, rollout_data)
+         advantages, returns = rollout_data["advantages"], rollout_data["returns"]
+@@ -892,7 +896,10 @@
+         log_probs = torch.cat(log_probs, dim=0)
+         ppo_kl = old_log_probs - log_probs
+ 
+-    pg_loss, pg_clipfrac = compute_policy_loss(ppo_kl, advantages, args.eps_clip, args.eps_clip_high)
++    pg_loss, pg_clipfrac = compute_policy_loss(
++        ppo_kl, advantages, args.eps_clip, args.eps_clip_high,
++        log_probs=log_probs, clip_type=getattr(args, "clip_type", "default"),
++    )
+ 
+     if args.use_opsm:
+         pg_loss = pg_loss * opsm_mask
+@@ -1158,13 +1165,16 @@
+         - `logging_dict` has keys "keys" (list of str metric names) and
+           "values" (1D tensor: [count, metric1, metric2, ...]).
+     """
+-    num_tokens = sum([torch.clamp_min(loss_mask.sum(), 1) for loss_mask in batch["loss_masks"]])
++    loss_masks = batch["loss_masks"]
++    if args.loss_type == "value_loss" and batch.get("value_loss_masks") is not None:
++        loss_masks = batch["value_loss_masks"]
++    num_tokens = sum([torch.clamp_min(loss_mask.sum(), 1) for loss_mask in loss_masks])
+     num_samples = len(batch["response_lengths"])
+ 
+     sum_of_sample_mean = get_sum_of_sample_mean(
+         batch["total_lengths"],
+         batch["response_lengths"],
+-        batch["loss_masks"],
++        loss_masks,
+         args.calculate_per_token_loss,
+         args.qkv_format,
+         batch.get("max_seq_lens", None),
+diff --git a/slime/backends/megatron_utils/model.py b/slime/backends/megatron_utils/model.py
+--- a/slime/backends/megatron_utils/model.py
++++ b/slime/backends/megatron_utils/model.py
+@@ -18,7 +18,8 @@
+ from megatron.core.optimizer.optimizer import MegatronOptimizer
+ from megatron.core.optimizer_param_scheduler import OptimizerParamScheduler
+ from megatron.core.pipeline_parallel import get_forward_backward_func
+-from megatron.core.utils import get_model_config, unwrap_model
++from megatron.core.utils import get_model_config
++from slime.utils.megatron_bridge_utils import unwrap_model
+ from megatron.training.global_vars import get_args
+ from megatron.training.training import get_model
+ from tqdm import tqdm
+@@ -77,6 +78,11 @@
+ 
+ def _critic_output_layer_needs_reinit(args: Namespace, model: Sequence[DDP], role: str) -> bool:
+     if role != "critic" or args.load is None:
++        return False
++    if (Path(args.load) / "config.json").is_file() and not (
++        Path(args.load) / "latest_checkpointed_iteration.txt"
++    ).is_file():
++        # HF backbone imports preserve the independently initialized value head.
+         return False
+ 
+     from megatron.core.dist_checkpointing.serialization import load_tensors_metadata
+@@ -178,6 +184,13 @@
+     return opt_param_scheduler
+ 
+ 
++def initialize_chained_optimizer_states(optimizer):
++    """Initialize child states without replacing the optimizer container."""
++    for child in getattr(optimizer, "chained_optimizers", [optimizer]):
++        if getattr(child, "init_state_fn", None):
++            child.init_state_fn(child.optimizer, child.config)
++
++
+ def setup_model_and_optimizer(
+     args: Namespace,
+     role: str = "actor",
+@@ -218,6 +231,10 @@
+         use_gloo_process_groups=args.enable_gloo_process_groups,
+     )
+     opt_param_scheduler = get_optimizer_param_scheduler(args, optimizer)
++
++    if role == "critic" and args.update_critic_expert_weights_only:
++        initialize_chained_optimizer_states(optimizer)
++
+     return model, optimizer, opt_param_scheduler
+ 
+ 
+@@ -477,6 +494,7 @@
+                 "values",
+                 "advantages",
+                 "returns",
++                "value_loss_masks",
+                 "rollout_log_probs",
+                 "max_seq_lens",
+                 "teacher_log_probs",
+@@ -587,6 +605,7 @@
+         num_samples_or_tokens = values[0]
+         for key, value in zip(keys, values[1:], strict=False):
+             loss_reduced[key] = value * mpu.get_context_parallel_world_size() / num_samples_or_tokens
++
+         return loss_reduced, grad_norm
+     return {}, grad_norm
+ 
+diff --git a/slime/backends/megatron_utils/model_provider.py b/slime/backends/megatron_utils/model_provider.py
+--- a/slime/backends/megatron_utils/model_provider.py
++++ b/slime/backends/megatron_utils/model_provider.py
+@@ -17,7 +17,7 @@
+ from megatron.core.transformer.transformer_config import TransformerConfig
+ from megatron.training.arguments import core_transformer_config_from_args
+ 
+-from slime.utils.megatron_bridge_utils import patch_auto_bridge_hf_config
++from slime.utils.megatron_bridge_utils import configure_bridge_recomputation, patch_auto_bridge_hf_config
+ from slime.utils.misc import load_function
+ 
+ 
+@@ -102,6 +102,7 @@
+             provider.num_layers_in_first_pipeline_stage = args.decoder_first_pipeline_num_layers
+         if getattr(args, "decoder_last_pipeline_num_layers", None) is not None:
+             provider.num_layers_in_last_pipeline_stage = args.decoder_last_pipeline_num_layers
++        configure_bridge_recomputation(provider, args)
+         provider.finalize()
+ 
+         if role == "critic":
+diff --git a/slime/ray/actor_group.py b/slime/ray/actor_group.py
+--- a/slime/ray/actor_group.py
++++ b/slime/ray/actor_group.py
+@@ -60,17 +60,12 @@
+         }
+ 
+         if self.args.offload_train and self.args.train_backend == "megatron":
+-            import torch_memory_saver
++            from slime.utils.memory_saver_utils import memory_saver_preload
+ 
+-            dynlib_path = os.path.join(
+-                os.path.dirname(os.path.dirname(torch_memory_saver.__file__)),
+-                "torch_memory_saver_hook_mode_preload.abi3.so",
+-            )
+-            assert os.path.exists(dynlib_path), f"LD_PRELOAD so file {dynlib_path} does not exist."
+-
+-            env_vars["LD_PRELOAD"] = dynlib_path
++            env_vars["LD_PRELOAD"] = memory_saver_preload()
+             env_vars["TMS_INIT_ENABLE"] = "1"
+             env_vars["TMS_INIT_ENABLE_CPU_BACKUP"] = "1"
++            env_vars["TMS_INIT_ENABLE_DISK_BACKUP"] = "0"
+ 
+         # We cannot do routing replay for critic.
+         if self.args.use_routing_replay and self.role == "actor":
+diff --git a/slime/ray/placement_group.py b/slime/ray/placement_group.py
+--- a/slime/ray/placement_group.py
++++ b/slime/ray/placement_group.py
+@@ -135,12 +135,12 @@
+ 
+     critic_model = None
+     if args.use_critic:
+-        from slime.utils.arguments import parse_megatron_role_args
++        from slime.utils.arguments import _apply_megatron_role_overrides, parse_megatron_role_args
+ 
+         critic_args = (
+             parse_megatron_role_args(args, args.megatron_config_path, role="critic")
+             if args.megatron_config_path is not None
+-            else args
++            else _apply_megatron_role_overrides(args, {}, role="critic", preserve_custom_advantage=True)
+         )
+         critic_model = allocate_train_group(
+             args=critic_args,
+diff --git a/slime/ray/rollout.py b/slime/ray/rollout.py
+--- a/slime/ray/rollout.py
++++ b/slime/ray/rollout.py
+@@ -773,6 +773,7 @@
+             partition = partitions[i]
+             rollout_data["partition"] = partition
+             for key in [
++                "metadata",
+                 "tokens",
+                 "multimodal_train_inputs",
+                 "response_lengths",
+@@ -1239,7 +1240,7 @@
+ 
+ def _compute_zero_std_metrics(args, all_samples: list[Sample]):
+     # only compute in GRPO-like algorithms where one prompt has multiple responses
+-    if args.advantage_estimator == "ppo":
++    if args.advantage_estimator in ("ppo", "vapo"):
+         return {}
+ 
+     def _is_zero_std(samples: list[Sample]):
+diff --git a/slime/rollout/compaction_buffer.py b/slime/rollout/compaction_buffer.py
+new file mode 100644
+--- /dev/null
++++ b/slime/rollout/compaction_buffer.py
+@@ -0,0 +1,92 @@
++"""slime adapter with exact token transport and explicit train_metadata."""
++
++import os
++import time
++import httpx
++from compactionrl.buffer.schema import validate_tokens
++
++
++def record_to_sample(record, index):
++    from slime.utils.types import Sample
++
++    info = record["token_info"]
++    first, count = validate_tokens(info)
++    meta = dict(record["metadata"])
++    if meta["optimized_tokens"] != count:
++        raise ValueError("Optimized token metadata disagrees with the loss mask")
++    return Sample(
++        index=index,
++        prompt=record["uid"],
++        tokens=info["input_ids"],
++        response_length=len(info["input_ids"]) - first,
++        rollout_log_probs=info["logprobs"][first:],
++        loss_mask=info["loss_mask"][first:],
++        reward=float(record["reward"]),
++        status=Sample.Status.COMPLETED,
++        metadata=meta,
++        train_metadata=meta,
++        weight_versions=info.get("weight_versions", []),
++        messages=record["messages"],
++    )
++
++
++def generate_rollout(args, rollout_id, data_source, evaluation=False):
++    from slime.rollout.base_types import RolloutFnTrainOutput
++
++    if evaluation:
++        raise ValueError("Use the standalone Harbor evaluation entry point")
++    if args.n_samples_per_prompt != 1:
++        raise ValueError(
++            "Batching uses one segment per sample; rollout groups are formed by buffer group_size"
++        )
++    deadline = time.monotonic() + float(
++        os.environ.get("COMPACTIONRL_BATCH_TIMEOUT", "1800")
++    )
++    with httpx.Client(timeout=30) as client:
++        base = args.rollout_buffer_url.rstrip("/")
++        client.post(
++            base + "/start_rollout", json={"hf_checkpoint": args.hf_checkpoint}
++        ).raise_for_status()
++        while time.monotonic() < deadline:
++            response = client.post(
++                base + "/get_rollout_data", json={"batch_size": args.global_batch_size}
++            )
++            response.raise_for_status()
++            batch = response.json()
++            if batch["success"]:
++                samples = [
++                    record_to_sample(r, rollout_id * args.global_batch_size + i)
++                    for i, r in enumerate(batch["data"])
++                ]
++                client.post(
++                    base + "/buffer/ack", json={"lease": batch["lease"]}
++                ).raise_for_status()
++                return RolloutFnTrainOutput(
++                    samples=[[s] for s in samples],
++                    metrics={
++                        "segments": len(samples),
++                        "optimized_tokens": sum(sum(s.loss_mask) for s in samples),
++                        "summary_optimized_tokens": sum(
++                            s.metadata.get("summary_optimized_tokens", 0)
++                            for s in samples
++                        ),
++                        "mean_summary_length": sum(
++                            s.metadata.get("summary_optimized_tokens", 0)
++                            for s in samples
++                        )
++                        / max(
++                            1, sum(s.metadata.get("summary_count", 0) for s in samples)
++                        ),
++                        "compacted_segments": sum(
++                            s.metadata["segment_count"] > 1 for s in samples
++                        ),
++                    },
++                )
++            if batch.get("collector", {}).get("failed", 0) >= 5 and not batch[
++                "collector"
++            ].get("completed"):
++                raise RuntimeError(
++                    f"Collector failed: {batch['collector']['last_error']}"
++                )
++            time.sleep(0.5)
++    raise TimeoutError("Training batch deadline exceeded; inspect collector health")
+diff --git a/slime/utils/arguments.py b/slime/utils/arguments.py
+--- a/slime/utils/arguments.py
++++ b/slime/utils/arguments.py
+@@ -812,6 +812,7 @@
+                     "reinforce_plus_plus",
+                     "reinforce_plus_plus_baseline",
+                     "ppo",
++                    "vapo",
+                 ],
+                 default="grpo",
+                 help=(
+@@ -1388,6 +1389,26 @@
+         parser = add_mtp_training_arguments(parser)
+         parser = add_ci_arguments(parser)
+         parser = add_custom_megatron_plugins_arguments(parser)
++        # CompactionRL integration; native rollout and algorithm defaults stay intact.
++        group = parser.add_argument_group("CompactionRL")
++        group.add_argument("--critic-num-nodes", type=int, default=None)
++        group.add_argument("--critic-num-gpus-per-node", type=int, default=None)
++        group.add_argument("--critic-load", type=str, default=None)
++        group.add_argument("--critic-save", type=str, default=None)
++        group.add_argument("--critic-lr", type=float, default=None)
++        group.add_argument("--critic-lr-warmup-iters", type=int, default=None)
++        group.add_argument("--critic-train-epoch", type=int, default=1)
++        group.add_argument("--clip-type", choices=["default", "dppo"], default="default")
++        group.add_argument("--use-compaction-gae", action="store_true", default=False)
++        group.add_argument("--lambd-critic", type=float, default=1.0)
++        group.add_argument("--use-length-adaptive-gae", action="store_true", default=False)
++        group.add_argument("--length-adaptive-alpha", type=float, default=1.5)
++        group.add_argument("--compaction-advantage-mode", choices=["none", "gae"], default="none")
++        group.add_argument("--use-step-level-advantage", action="store_true", default=False)
++        group.add_argument("--stepwise-advantage-type", choices=["last_token", "step_average"], default="last_token")
++        group.add_argument("--critic-stepwise-max-chunk-size", type=int, default=-1)
++        group.add_argument("--update-critic-expert-weights-only", action="store_true", default=False,
++                           help="Historical reference compatibility: initialize critic optimizer states; does not freeze parameters")
+         reset_arg(
+             parser,
+             "--custom-config-path",
+@@ -1464,7 +1485,7 @@
+     return args
+ 
+ 
+-def _apply_megatron_role_overrides(base_args, overrides, role):
++def _apply_megatron_role_overrides(base_args, overrides, role, preserve_custom_advantage=False):
+     role_args = copy.deepcopy(base_args)
+     ignored_keys = {"num_nodes", "num_gpus_per_node"}
+ 
+@@ -1488,10 +1509,17 @@
+         setattr(role_args, key, value)
+ 
+     if role == "critic":
++        # Apply explicitly supplied critic CLI overrides without changing actor args.
++        for source, target in (("critic_load", "load"), ("critic_save", "save"),
++                               ("critic_lr", "lr"), ("critic_lr_warmup_iters", "lr_warmup_iters")):
++            value = getattr(role_args, source, None)
++            if value is not None:
++                setattr(role_args, target, value)
+         # Critic-specific: disable features that only apply to actors.
+         role_args.kl_coef = 0
+         role_args.use_opd = False
+-        role_args.custom_advantage_function_path = None
++        if not preserve_custom_advantage:
++            role_args.custom_advantage_function_path = None
+         role_args.untie_embeddings_and_output_weights = True
+ 
+     return role_args
+@@ -1640,7 +1668,9 @@
+         if args.opd_teacher_load is not None:
+             raise ValueError("--opd-teacher-load is set but --use-opd is not enabled. Please add --use-opd flag.")
+ 
+-    if args.megatron_to_hf_mode == "bridge":
++    if args.megatron_to_hf_mode == "bridge" or (
++        args.load is not None and os.path.isfile(os.path.join(args.load, "config.json"))
++    ):
+         if (
+             args.load is not None
+             and os.path.exists(args.load)
+@@ -1716,10 +1746,17 @@
+         )
+         args.debug_train_only = True
+ 
+-    args.use_critic = args.advantage_estimator == "ppo"
+-    # Critic always uses the same GPU count as actor.
+-    args.critic_num_gpus_per_node = args.actor_num_gpus_per_node
+-    args.critic_num_nodes = args.actor_num_nodes
++    args.use_critic = args.advantage_estimator in ("ppo", "vapo")
++    if getattr(args, "critic_train_epoch", 1) < 1:
++        raise ValueError("--critic-train-epoch must be positive")
++    if args.advantage_estimator == "vapo" and not getattr(args, "use_compaction_gae", False):
++        raise ValueError("The CompactionRL VAPO recipe requires --use-compaction-gae")
++    if getattr(args, "use_compaction_gae", False) and args.custom_advantage_function_path is not None:
++        raise ValueError("Select CompactionRL GAE or a custom advantage callback, not both")
++    if getattr(args, "critic_num_gpus_per_node", None) is None:
++        args.critic_num_gpus_per_node = args.actor_num_gpus_per_node
++    if getattr(args, "critic_num_nodes", None) is None:
++        args.critic_num_nodes = args.actor_num_nodes
+ 
+     if args.offload:
+         args.offload_train = True
+diff --git a/slime/utils/megatron_bridge_utils.py b/slime/utils/megatron_bridge_utils.py
+--- a/slime/utils/megatron_bridge_utils.py
++++ b/slime/utils/megatron_bridge_utils.py
+@@ -3,7 +3,10 @@
+ try:
+     from megatron.core.utils import unwrap_model
+ except ImportError:
+-    unwrap_model = None
++    try:
++        from megatron.training.utils import unwrap_model
++    except ImportError:
++        unwrap_model = None
+ 
+ 
+ def patch_hf_config_for_megatron_bridge(hf_config):
+@@ -39,6 +42,27 @@
+ 
+ 
+ @contextmanager
++def preserve_critic_value_head(model):
++    """Load a causal-LM backbone without mapping its vocabulary head to a scalar head."""
++    if getattr(model[0], "role", "actor") != "critic":
++        yield
++        return
++    saved = []
++    try:
++        for module in unwrap_model(model):
++            head = getattr(module, "output_layer", None)
++            if head is not None:
++                saved.append((module, head))
++                # Bridge builds import tasks from the target's named parameters.
++                # The already initialized value head has no HF counterpart.
++                module.output_layer = None
++        yield
++    finally:
++        for module, head in saved:
++            module.output_layer = head
++
++
++@contextmanager
+ def patch_megatron_model(model):
+     unwrapped_model = unwrap_model(model)[0]
+     model_config = unwrapped_model.config
+@@ -52,3 +76,11 @@
+     finally:
+         if attribute_was_added:
+             delattr(model_config, "share_embeddings_and_output_weights")
++
++
++def configure_bridge_recomputation(provider, args):
++    """Apply explicit memory settings when Bridge supplies the model config."""
++    for name in ("recompute_granularity", "recompute_method", "recompute_num_layers"):
++        value = getattr(args, name, None)
++        if value is not None:
++            setattr(provider, name, value)
+diff --git a/slime/utils/memory_saver_utils.py b/slime/utils/memory_saver_utils.py
+new file mode 100644
+--- /dev/null
++++ b/slime/utils/memory_saver_utils.py
+@@ -0,0 +1,18 @@
++"""Resolve the installed memory-saver preload without assuming a wheel suffix."""
++
++import os
++from pathlib import Path
++
++
++def memory_saver_preload():
++    import torch_memory_saver
++
++    if hasattr(torch_memory_saver, "configure_subprocess"):
++        with torch_memory_saver.configure_subprocess():
++            return os.environ["LD_PRELOAD"]
++    # Compatibility with older wheels that predate the public helper.
++    path = Path(torch_memory_saver.__file__).parent.parent / "torch_memory_saver_hook_mode_preload.abi3.so"
++    if not path.is_file():
++        raise FileNotFoundError(f"Memory-saver preload library is missing: {path}")
++    existing = os.environ.get("LD_PRELOAD", "")
++    return f"{path}:{existing}" if existing else str(path)
+diff --git a/slime/utils/ppo_utils.py b/slime/utils/ppo_utils.py
+--- a/slime/utils/ppo_utils.py
++++ b/slime/utils/ppo_utils.py
+@@ -121,6 +121,28 @@
+     return ppo_kl
+ 
+ 
++def compute_dppo_policy_loss(
++    log_probs: torch.Tensor,
++    old_log_probs: torch.Tensor,
++    advantages: torch.Tensor,
++    ppo_kl: torch.Tensor,
++    eps_clip: float,
++    eps_clip_high: float,
++):
++    ratio = (-ppo_kl).exp().detach()
++    ratio = ratio.clamp(0.5, 2)
++    delta = log_probs.exp().detach() - old_log_probs.exp().detach()
++
++    adv_mask = (advantages > 0).float()
++    eps_matrix = torch.full_like(advantages, eps_clip_high) * adv_mask + (1 - adv_mask) * torch.full_like(advantages, eps_clip)
++    violation = delta.abs() > eps_matrix
++
++    clipped_multiplier = (~violation).to(dtype=advantages.dtype)
++    pg_losses = -clipped_multiplier * ratio * advantages * log_probs
++    clipfrac = violation.to(dtype=advantages.dtype).detach()
++    return pg_losses, clipfrac
++
++
+ @torch.compile(dynamic=True)
+ def compute_policy_loss(
+     ppo_kl: torch.Tensor,
+@@ -128,7 +150,14 @@
+     eps_clip: float,
+     eps_clip_high: float,
+     eps_clip_c: float | None = None,
++    clip_type: str = "default",
++    log_probs: torch.Tensor | None = None,
+ ):
++    if clip_type == "dppo":
++        assert log_probs is not None, "log_probs must be provided for dppo loss"
++        return compute_dppo_policy_loss(
++            log_probs, ppo_kl + log_probs, advantages, ppo_kl, eps_clip, eps_clip_high
++        )
+     ratio = (-ppo_kl).exp()
+     pg_losses1 = -ratio * advantages
+     pg_losses2 = -ratio.clamp(1 - eps_clip, 1 + eps_clip_high) * advantages
+@@ -679,3 +708,228 @@
+             entropy = logits.new_zeros((0,))
+ 
+     return log_prob, entropy
++
++
++# CompactionRL: masked token GAE and the optional historical stepwise variant.
++
++def mask_chunks(mask, max_chunk_size=-1):
++    """Split consecutive equal mask values, optionally limiting each run's size."""
++    if mask.ndim != 1 or not mask.numel() or not ((mask == 0) | (mask == 1)).all():
++        raise ValueError("Expected a nonempty binary response mask")
++    boundaries = [
++        0,
++        *(mask[1:] != mask[:-1]).nonzero().flatten().add(1).tolist(),
++        len(mask),
++    ]
++    spans = []
++    for start, end in zip(boundaries, boundaries[1:]):
++        size = max_chunk_size if max_chunk_size > 0 else end - start
++        spans.extend((i, min(i + size, end)) for i in range(start, end, size))
++    return spans
++
++
++def stepwise_value_mask(mask, max_chunk_size=-1):
++    result = torch.zeros_like(mask)
++    for start, end in mask_chunks(mask, max_chunk_size):
++        if mask[start] == 1:
++            result[end - 1] = 1
++    return result
++
++
++@torch.no_grad()
++def stepwise_segment_gae(
++    values,
++    mask,
++    reward,
++    later_tokens,
++    gamma=1.0,
++    lambd=None,
++    alpha=1.5,
++    enabled=True,
++    max_chunk_size=-1,
++    value_type="last_token",
++):
++    """Use one value per generated run and broadcast its advantage to that run.
++
++    The development implementation's adaptive lambda counts all mask chunks,
++    including observations, while the recurrence advances on generated chunks.
++    This optional variant preserves that convention; it differs from token GAE.
++    """
++    if (
++        values.ndim != 1
++        or values.shape != mask.shape
++        or not mask.any()
++        or later_tokens < 0
++    ):
++        raise ValueError(
++            "Expected aligned nonempty generated tokens and nonnegative N_after"
++        )
++    if value_type not in {"last_token", "step_average"}:
++        raise ValueError(f"Unknown stepwise value type: {value_type}")
++    spans = mask_chunks(mask, max_chunk_size)
++    lam = 1 - 1 / (alpha * len(spans)) if lambd is None else float(lambd)
++    if not 0 <= lam <= 1 or not 0 <= gamma <= 1:
++        raise ValueError("Invalid stepwise discount factor")
++    advantage = torch.zeros_like(values, dtype=torch.float32)
++    returns = torch.zeros_like(advantage)
++    tail = values.new_zeros((), dtype=torch.float32)
++    next_value = values.new_zeros((), dtype=torch.float32)
++    terminal = True
++    for start, end in reversed(spans):
++        if mask[start] == 0:
++            continue
++        chunk = values[start:end].float()
++        current = chunk[-1] if value_type == "last_token" else chunk.mean()
++        tail = (
++            (reward if terminal else 0.0)
++            + gamma * next_value
++            - current
++            + gamma * lam * tail
++        )
++        advantage[start:end] = tail
++        next_value = current
++        terminal = False
++    if enabled:
++        advantage *= (gamma * lam) ** int(later_tokens)
++    returns[mask.bool()] = (advantage + values.float())[mask.bool()]
++    return advantage, returns
++
++
++def masked_segment_gae(
++    values, mask, reward, later_tokens, gamma=1.0, lambd=None, alpha=1.5, enabled=True
++):
++    if values.ndim != 1 or values.shape != mask.shape:
++        raise ValueError("Expected aligned one-dimensional values and mask")
++    positions = mask.bool().nonzero(as_tuple=True)[0]
++    count = positions.numel()
++    if not count or later_tokens < 0:
++        raise ValueError("Empty segment or negative subsequent token count")
++    lam = 1 - 1 / (alpha * count) if lambd is None else float(lambd)
++    if not 0 <= lam <= 1 or not 0 <= gamma <= 1:
++        raise ValueError("Invalid discount factor")
++    selected = values[positions].float()
++    advantage = torch.empty_like(selected)
++    tail = torch.zeros((), device=values.device)
++    for i in range(count - 1, -1, -1):
++        next_value = selected[i + 1] if i + 1 < count else 0.0
++        r = reward if i == count - 1 else 0.0
++        tail = r + gamma * next_value - selected[i] + gamma * lam * tail
++        advantage[i] = tail
++    if enabled:
++        advantage *= (gamma * lam) ** int(later_tokens)
++    full_adv = torch.zeros_like(values, dtype=torch.float32)
++    full_ret = torch.zeros_like(values, dtype=torch.float32)
++    full_adv[positions] = advantage
++    full_ret[positions] = advantage + selected
++    return full_adv, full_ret
++
++
++@torch.no_grad()
++def compute_compaction_advantages(args, rollout_data, is_policy=True):
++    from megatron.core import mpu
++    from slime.backends.megatron_utils.cp_utils import (
++        all_gather_with_cp,
++        slice_log_prob_with_cp,
++    )
++
++    if args.kl_coef != 0:
++        raise ValueError("This paper recipe uses KL coefficient zero")
++    metadata = rollout_data.get("metadata")
++    if metadata is None or len(metadata) != len(rollout_data["values"]):
++        raise ValueError(
++            "Missing segment metadata: cross-segment correction cannot be computed"
++        )
++    advantages, returns, rewards = [], [], []
++    stepwise = getattr(args, "use_step_level_advantage", False)
++    value_masks = []
++    cp_size = mpu.get_context_parallel_world_size()
++    for i, local_values in enumerate(rollout_data["values"]):
++        total = rollout_data["total_lengths"][i]
++        length = rollout_data["response_lengths"][i]
++        full_values = (
++            all_gather_with_cp(local_values, total, length)
++            if cp_size > 1
++            else local_values
++        )
++        mask = torch.as_tensor(rollout_data["loss_masks"][i], device=full_values.device)
++        if len(mask) != length:
++            raise ValueError("Expected full response loss mask before CP slicing")
++        meta = metadata[i]
++        if int(mask.sum()) != meta["optimized_tokens"]:
++            raise ValueError("Training mask changed after N_after was computed")
++        lam = (
++            None
++            if is_policy and args.use_length_adaptive_gae
++            else (args.lambd if is_policy else args.lambd_critic)
++        )
++        estimator = masked_segment_gae
++        extra = {}
++        if stepwise:
++            estimator = stepwise_segment_gae
++            extra = dict(
++                max_chunk_size=args.critic_stepwise_max_chunk_size,
++                value_type=args.stepwise_advantage_type,
++            )
++            if not is_policy and args.stepwise_advantage_type == "last_token":
++                value_masks.append(
++                    stepwise_value_mask(mask, args.critic_stepwise_max_chunk_size)
++                )
++        adv, ret = estimator(
++            full_values,
++            mask,
++            float(rollout_data["rewards"][i]),
++            int(meta["later_assistant_tokens"]),
++            gamma=args.gamma,
++            lambd=lam,
++            alpha=args.length_adaptive_alpha,
++            enabled=args.compaction_advantage_mode == "gae",
++            **extra,
++        )
++        reward_tensor = torch.zeros_like(full_values)
++        reward_tensor[mask.nonzero(as_tuple=True)[0][-1]] = float(
++            rollout_data["rewards"][i]
++        )
++        if cp_size > 1:
++            adv, ret, reward_tensor = [
++                slice_log_prob_with_cp(x, total, length)
++                for x in (adv, ret, reward_tensor)
++            ]
++        advantages.append(adv)
++        returns.append(ret)
++        rewards.append(reward_tensor)
++    rollout_data.update(advantages=advantages, returns=returns, token_rewards=rewards)
++    if value_masks:
++        rollout_data["value_loss_masks"] = value_masks
++    else:
++        rollout_data.pop("value_loss_masks", None)
++
++
++@torch.no_grad()
++def group_estimate(args, rollout_data, is_policy=True):
++    """SUPO-style baseline: one rollout-relative advantage for every segment token."""
++    from megatron.core import mpu
++    from slime.backends.megatron_utils.cp_utils import slice_log_prob_with_cp
++
++    advantages = []
++    for i, meta in enumerate(rollout_data["metadata"]):
++        if meta.get("group_size", 0) < 2 or "group_advantage" not in meta:
++            raise ValueError("Missing independent-rollout group advantage")
++        reference = (
++            rollout_data.get("log_probs")
++            or rollout_data.get("rollout_log_probs")
++            or rollout_data.get("values")
++        )
++        if not reference:
++            raise ValueError("Missing model tensors for group advantage placement")
++        mask = torch.as_tensor(
++            rollout_data["loss_masks"][i], device=reference[i].device
++        )
++        advantage = mask.float() * float(meta["group_advantage"])
++        if mpu.get_context_parallel_world_size() > 1:
++            advantage = slice_log_prob_with_cp(
++                advantage,
++                rollout_data["total_lengths"][i],
++                rollout_data["response_lengths"][i],
++            )
++        advantages.append(advantage)
++    rollout_data.update(advantages=advantages, returns=advantages)
+diff --git a/slime/utils/profile_utils.py b/slime/utils/profile_utils.py
+--- a/slime/utils/profile_utils.py
++++ b/slime/utils/profile_utils.py
+@@ -19,7 +19,7 @@
+         if args.use_pytorch_profiler and ("train_overall" in args.profile_target):
+             self._torch_profiler_overall = _create_torch_profiler(args, name="train_overall")
+ 
+-        if args.record_memory_history and ("train_overall" in args.profile_target):
++        if getattr(args, "record_memory_history", False) and ("train_overall" in args.profile_target):
+             self._memory_profiler_overall = _BaseMemoryProfiler.create(args)
+             self._memory_profiler_overall.start()
+ 
+diff --git a/slime/utils/types.py b/slime/utils/types.py
+--- a/slime/utils/types.py
++++ b/slime/utils/types.py
+@@ -49,6 +49,7 @@
+     session_id: str | None = None
+ 
+     non_generation_time: float = 0.0  # time spent in non-generation steps
++    messages: list[dict] | None = None  # CompactionRL original segment messages
+ 
+     @dataclass
+     class SpecInfo:
+diff --git a/train_compactionrl.py b/train_compactionrl.py
+new file mode 100644
+--- /dev/null
++++ b/train_compactionrl.py
+@@ -0,0 +1,144 @@
++"""Parse the retained slime recipe and own the Ray driver's lifecycle."""
++
++import json
++import os
++import signal
++
++
++def configure_validation_limits():
++    """Bound parser checks before importing any training dependencies."""
++    import atexit
++    import resource
++    import sys
++
++    if sys.platform != "linux":
++        raise RuntimeError("Training argument validation requires Linux")
++    inherited = resource.getrlimit(resource.RLIMIT_AS)
++    limit = min([8 * 1024**3, *(v for v in inherited if v != resource.RLIM_INFINITY)])
++    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
++    os.environ["CUDA_VISIBLE_DEVICES"] = ""
++    for name in (
++        "OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "RAYON_NUM_THREADS"
++    ):
++        os.environ[name] = "1"
++    os.environ["TOKENIZERS_PARALLELISM"] = "false"
++
++    def report_memory():
++        peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
++        print(f"Validation peak process RSS: {peak / 1024:.1f} MiB", flush=True)
++
++    atexit.register(report_memory)
++    print(
++        f"Validation address-space hard limit: {limit / 1024**3:.1f} GiB; GPUs hidden",
++        flush=True,
++    )
++
++
++def main():
++    validation_only = os.environ.get("COMPACTIONRL_VALIDATE_ONLY") == "1"
++    if validation_only:
++        configure_validation_limits()
++    from compactionrl.runtime.storage import prepare_storage, storage_environment
++
++    work_dir = os.environ.get("COMPACTIONRL_WORK_DIR")
++    if not work_dir:
++        raise ValueError(
++            "Use the project launcher to select a data-volume runtime directory"
++        )
++    os.environ.update(prepare_storage(work_dir, work_dir))
++    cuda_architectures = os.environ.get("TORCH_CUDA_ARCH_LIST")
++    from slime.utils.arguments import parse_args
++
++    args = parse_args()
++    if validation_only:
++        # Validate configuration only; full trainer/Bridge imports belong to the
++        # training process. A parser check must not instantiate a model provider.
++        from megatron.training.arguments import core_transformer_config_from_args
++
++        core_transformer_config_from_args(args)
++        keys = [
++            "hf_checkpoint",
++            "load",
++            "critic_load",
++            "num_rollout",
++            "advantage_estimator",
++            "use_critic",
++            "clip_type",
++            "eps_clip",
++            "eps_clip_high",
++            "actor_num_nodes",
++            "actor_num_gpus_per_node",
++            "rollout_num_gpus",
++            "rollout_buffer_url",
++            "sglang_router_ip",
++            "sglang_router_port",
++            "tensor_model_parallel_size",
++            "pipeline_model_parallel_size",
++            "context_parallel_size",
++            "expert_model_parallel_size",
++            "custom_advantage_function_path",
++            "use_compaction_gae",
++            "use_step_level_advantage",
++            "stepwise_advantage_type",
++        ]
++        print("CompactionRL argument validation passed")
++        print(json.dumps({key: getattr(args, key, None) for key in keys}, indent=2))
++        return
++    import ray
++    from train_async import train
++
++    # Megatron's legacy fused-kernel import clears this variable globally.
++    # Restore the launcher's value before Ray starts workers without visible GPUs.
++    if cuda_architectures:
++        os.environ["TORCH_CUDA_ARCH_LIST"] = cuda_architectures
++
++    def stop(signum, frame):
++        raise SystemExit(128 + signum)
++
++    signal.signal(signal.SIGTERM, stop)
++    # A private local cluster is the default. Remote mode uses an explicitly
++    # supplied cluster and requires this checkout/assets at identical paths.
++    keys = [
++        "PYTHONPATH",
++        "COMPACTIONRL_BATCH_TIMEOUT",
++        "CUDA_DEVICE_MAX_CONNECTIONS",
++        "TORCH_CUDA_ARCH_LIST",
++        "LITELLM_LOCAL_MODEL_COST_MAP",
++        "TOKENIZERS_PARALLELISM",
++        "WANDB_MODE",
++        "TENSORBOARD_DIR",
++    ]
++    prepare_storage(work_dir, args.save)
++    keys.extend(storage_environment(work_dir))
++    runtime_env = {
++        "env_vars": {key: os.environ[key] for key in keys if key in os.environ}
++    }
++    address = os.environ.get("COMPACTIONRL_RAY_ADDRESS", "local")
++    options = (
++        {
++            "object_store_memory": 2 * 1024**3,
++            "include_dashboard": False,
++            "_temp_dir": os.environ["RAY_TMPDIR"],
++            "_system_config": {
++                "object_spilling_config": json.dumps(
++                    {
++                        "type": "filesystem",
++                        "params": {
++                            "directory_path": os.environ["COMPACTIONRL_RAY_SPILL_DIR"]
++                        },
++                    }
++                ),
++            },
++        }
++        if address == "local"
++        else {}
++    )
++    ray.init(address=address, runtime_env=runtime_env, **options)
++    try:
++        train(args)
++    finally:
++        ray.shutdown()
++
++
++if __name__ == "__main__":
++    main()

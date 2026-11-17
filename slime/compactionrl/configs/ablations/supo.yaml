@@ -1,0 +1,7 @@
+# Groups are independent rollouts for one prompt; segments inherit the rollout advantage.
+group_size: 4
+training:
+  advantage_estimator: grpo
+  use_compaction_gae: false
+  custom_advantage_function_path: slime.utils.ppo_utils.group_estimate
+  num_critic_only_steps: 0

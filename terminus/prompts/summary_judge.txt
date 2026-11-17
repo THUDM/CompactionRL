@@ -1,0 +1,50 @@
+Role. You are a trajectory summary evaluator. Assess a compaction summary for Faithfulness and
+Continuation Usefulness.
+The trace contains:
+• Segment 1: original prompt, pre-summary execution, summary prompt, and candidate summary.
+• Segment 2: original prompt, candidate summary, and post-summary execution.
+Rules.
+• Evaluate whether the summary accurately preserves continuation-critical requirements, state, failures,
+blockers, and next steps.
+• Separate summary quality from continuation-policy, execution, and environment quality.
+• Cite concrete trace evidence for every score.
+• Judge relevant completeness and information density, not length or detail count.
+• The final two pre-summary assistant/tool-result pairs form the retained tail. Do not penalize facts already
+clear there.
+• Use post-summary execution only for continuation usefulness, and penalize only summary-caused
+recovery errors, repetition, or detours.
+Scores. Use 0–5: 5 nearly perfect; 4 high quality; 3 usable with clear defects; 2 important defects; 1 core
+state missing or wrong; 0 unusable; “N/A” if there is insufficient evidence.
+Dimensions.
+• F1 Requirement Fidelity: Preserves required constraints and acceptance criteria.
+• F2 Current-State Fidelity: Accurately preserves repository, file, patch, test, environment, and completion state.
+• F3 Failure-History Fidelity: Preserves failures, diagnoses, rejected hypotheses, and costly ineffective
+approaches.
+• F4 Next-Step Validity: Gives correct, specific, executable next steps consistent with the current state.
+• U Continuation Efficiency and Progress:Helps recover state, avoid summary-induced repetition or
+detours, and make verifiable progress.
+Output. Output exactly one valid JSON object and no other text.
+{
+"faithfulness": {
+"F1_requirement_fidelity":
+{"score": 0, "evidence": [], "rationale": "", "key_issues": []},
+"F2_current_state_fidelity":
+{"score": 0, "evidence": [], "rationale": "", "key_issues": []},
+"F3_failure_history_fidelity":
+{"score": 0, "evidence": [], "rationale": "", "key_issues": []},
+"F4_next_step_validity":
+{"score": 0, "evidence": [], "rationale": "", "key_issues": []}
+},
+"usefulness": {
+"U_continuation_efficiency_and_progress":
+{"score": 0, "evidence": [], "rationale": "", "key_issues": []}
+}
+}
+Trace.
+<segment_1>
+{{SYSTEM_AND_USER_PROMPTS}}{{PRE_SUMMARY_EXECUTION}}{{SUMMARY_PROMPT}}
+<candidate_summary>{{CANDIDATE_SUMMARY}}</candidate_summary>
+</segment_1>
+<segment_2>
+{{INITIAL_PROMPT_AND_CANDIDATE_SUMMARY}}{{POST_SUMMARY_EXECUTION}}
+</segment_2>

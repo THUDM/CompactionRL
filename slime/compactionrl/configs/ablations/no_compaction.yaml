@@ -1,0 +1,6 @@
+{
+  "agent": {
+    "enable_summarize": false,
+    "context_management_max_count": 0
+  }
+}

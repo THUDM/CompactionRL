@@ -1,0 +1,7 @@
+{
+  "training": {
+    "clip_type": "dppo",
+    "eps_clip": 0.4,
+    "eps_clip_high": 0.5
+  }
+}
